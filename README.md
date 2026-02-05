@@ -9,7 +9,7 @@ Used by [knock](https://github.com/michaelyang12/knock) and [suss](https://githu
 Add to your `Cargo.toml`:
 
 ```toml
-conduit = { git = "ssh://git@github.com/michaelyang12/conduit.git", path = "../conduit" }
+conduit = { git = "https://github.com/michaelyang12/conduit.git", path = "../conduit" }
 ```
 
 ### Make a request
