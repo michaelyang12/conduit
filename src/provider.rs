@@ -56,45 +56,36 @@ pub struct Preset {
     pub endpoint: &'static str,
     pub api_key_env: Option<&'static str>,
     pub default_model: Option<&'static str>,
-    /// Shown by the setup wizard when the provider's model list can't be fetched.
-    pub suggested_models: &'static [&'static str],
+    /// `(id, description)` pairs shown when the provider can't list its models itself.
+    pub suggested_models: &'static [(&'static str, &'static str)],
     pub local: bool,
 }
 
 pub const PRESETS: &[Preset] = &[
     Preset {
-        name: "openai",
-        label: "OpenAI",
-        protocol: Protocol::OpenaiResponses,
-        endpoint: "https://api.openai.com/v1",
-        api_key_env: Some("OPENAI_API_KEY"),
-        default_model: Some("gpt-5.1"),
-        suggested_models: &["gpt-5.1", "gpt-5-mini", "gpt-5-nano"],
-        local: false,
-    },
-    Preset {
-        name: "anthropic",
-        label: "Anthropic",
-        protocol: Protocol::Anthropic,
-        endpoint: "https://api.anthropic.com/v1",
-        api_key_env: Some("ANTHROPIC_API_KEY"),
-        default_model: Some("claude-sonnet-5-5"),
-        suggested_models: &["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"],
-        local: false,
-    },
-    Preset {
         name: "claude-code",
-        label: "Claude Code (uses your `claude` sign-in)",
+        label: "Claude Code",
         protocol: Protocol::ClaudeCode,
         endpoint: "claude",
         api_key_env: None,
         default_model: None,
-        suggested_models: &["haiku", "sonnet", "opus"],
+        suggested_models: &[
+            ("claude-fable-5-2", "Fable 5.2: most capable, slowest"),
+            ("claude-opus-5-5", "Opus 5.5: deep reasoning"),
+            (
+                "claude-sonnet-5-5",
+                "Sonnet 5.5: balanced speed and quality",
+            ),
+            ("claude-haiku-5-5", "Haiku 5.5: fastest"),
+            ("claude-opus-5", "Opus 5"),
+            ("claude-sonnet-5", "Sonnet 5"),
+            ("claude-opus-4-8", "Opus 4.8"),
+        ],
         local: true,
     },
     Preset {
         name: "codex",
-        label: "Codex (uses your `codex` sign-in)",
+        label: "Codex",
         protocol: Protocol::Codex,
         endpoint: "codex",
         api_key_env: None,
@@ -103,24 +94,39 @@ pub const PRESETS: &[Preset] = &[
         local: true,
     },
     Preset {
-        name: "ollama",
-        label: "Ollama (local)",
-        protocol: Protocol::Ollama,
-        endpoint: "http://localhost:11434",
-        api_key_env: None,
-        default_model: None,
-        suggested_models: &[],
-        local: true,
+        name: "anthropic",
+        label: "Anthropic",
+        protocol: Protocol::Anthropic,
+        endpoint: "https://api.anthropic.com/v1",
+        api_key_env: Some("ANTHROPIC_API_KEY"),
+        default_model: Some("claude-sonnet-5-5"),
+        suggested_models: &[
+            ("claude-fable-5-2", "Fable 5.2: most capable, slowest"),
+            ("claude-opus-5-5", "Opus 5.5: deep reasoning"),
+            (
+                "claude-sonnet-5-5",
+                "Sonnet 5.5: balanced speed and quality",
+            ),
+            ("claude-haiku-5-5", "Haiku 5.5: fastest"),
+            ("claude-opus-5", "Opus 5"),
+            ("claude-sonnet-5", "Sonnet 5"),
+            ("claude-opus-4-8", "Opus 4.8"),
+        ],
+        local: false,
     },
     Preset {
-        name: "lmstudio",
-        label: "LM Studio (local)",
-        protocol: Protocol::ChatCompletions,
-        endpoint: "http://localhost:1234/v1",
-        api_key_env: None,
-        default_model: None,
-        suggested_models: &[],
-        local: true,
+        name: "openai",
+        label: "OpenAI",
+        protocol: Protocol::OpenaiResponses,
+        endpoint: "https://api.openai.com/v1",
+        api_key_env: Some("OPENAI_API_KEY"),
+        default_model: Some("gpt-5.1"),
+        suggested_models: &[
+            ("gpt-5.1", "GPT-5.1"),
+            ("gpt-5-mini", "GPT-5 mini: faster, cheaper"),
+            ("gpt-5-nano", "GPT-5 nano: fastest"),
+        ],
+        local: false,
     },
     Preset {
         name: "gemini",
@@ -129,7 +135,10 @@ pub const PRESETS: &[Preset] = &[
         endpoint: "https://generativelanguage.googleapis.com/v1beta/openai",
         api_key_env: Some("GEMINI_API_KEY"),
         default_model: Some("gemini-2.5-flash"),
-        suggested_models: &["gemini-2.5-flash", "gemini-2.5-pro"],
+        suggested_models: &[
+            ("gemini-2.5-flash", "fast"),
+            ("gemini-2.5-pro", "most capable"),
+        ],
         local: false,
     },
     Preset {
@@ -139,7 +148,10 @@ pub const PRESETS: &[Preset] = &[
         endpoint: "https://api.groq.com/openai/v1",
         api_key_env: Some("GROQ_API_KEY"),
         default_model: Some("llama-3.3-70b-versatile"),
-        suggested_models: &["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+        suggested_models: &[
+            ("llama-3.3-70b-versatile", "Llama 3.3 70B"),
+            ("llama-3.1-8b-instant", "Llama 3.1 8B: fastest"),
+        ],
         local: false,
     },
     Preset {
@@ -149,7 +161,7 @@ pub const PRESETS: &[Preset] = &[
         endpoint: "https://openrouter.ai/api/v1",
         api_key_env: Some("OPENROUTER_API_KEY"),
         default_model: Some("openrouter/auto"),
-        suggested_models: &["openrouter/auto"],
+        suggested_models: &[("openrouter/auto", "OpenRouter picks the model")],
         local: false,
     },
     Preset {
@@ -159,13 +171,52 @@ pub const PRESETS: &[Preset] = &[
         endpoint: "https://api.deepseek.com/v1",
         api_key_env: Some("DEEPSEEK_API_KEY"),
         default_model: Some("deepseek-chat"),
-        suggested_models: &["deepseek-chat", "deepseek-reasoner"],
+        suggested_models: &[
+            ("deepseek-chat", "DeepSeek chat"),
+            ("deepseek-reasoner", "DeepSeek reasoning model"),
+        ],
         local: false,
+    },
+    Preset {
+        name: "ollama",
+        label: "Ollama",
+        protocol: Protocol::Ollama,
+        endpoint: "http://localhost:11434",
+        api_key_env: None,
+        default_model: None,
+        suggested_models: &[],
+        local: true,
+    },
+    Preset {
+        name: "lmstudio",
+        label: "LM Studio",
+        protocol: Protocol::ChatCompletions,
+        endpoint: "http://localhost:1234/v1",
+        api_key_env: None,
+        default_model: None,
+        suggested_models: &[],
+        local: true,
     },
 ];
 
 pub fn preset(name: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|p| p.name == name)
+}
+
+/// A model a provider offers, as shown by the setup wizard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub id: String,
+    pub description: Option<String>,
+}
+
+impl ModelInfo {
+    pub fn new(id: impl Into<String>, description: Option<String>) -> Self {
+        Self {
+            id: id.into(),
+            description: description.filter(|d| !d.trim().is_empty()),
+        }
+    }
 }
 
 /// A fully resolved provider: where to send requests and how.

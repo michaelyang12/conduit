@@ -185,7 +185,12 @@ async fn ollama_round_trip() {
     assert_eq!(r.text, "1 2 3");
     assert_eq!(r.stop, StopReason::MaxTokens);
     assert_eq!(
-        c.list_models().await.unwrap(),
+        c.list_models()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect::<Vec<_>>(),
         vec!["llama3.2:latest", "qwen3:8b"]
     );
 }
@@ -285,4 +290,43 @@ async fn missing_model_is_reported_before_any_request() {
         c.prompt("hi").send().await,
         Err(Error::MissingModel { .. })
     ));
+}
+
+#[tokio::test]
+async fn unsupported_structured_output_falls_back_to_prompted_json() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({ "format": "json" })))
+        .respond_with(
+            ResponseTemplate::new(501)
+                .set_body_json(json!({ "error": "structured output is unavailable" })),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "message": { "content": "```json\n{\"n\": 2}\n```" },
+            "done_reason": "stop"
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    #[derive(serde::Deserialize)]
+    struct N {
+        n: u8,
+    }
+    let c = Conduit::new(Provider::new("ollama", Protocol::Ollama, server.uri()).with_model("m"));
+    let parsed: N = c.prompt("two").json().await.unwrap();
+    assert_eq!(parsed.n, 2);
+    let requests = server.received_requests().await.unwrap();
+    let retry: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert!(retry.get("format").is_none());
+    assert!(
+        retry["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("JSON")
+    );
 }

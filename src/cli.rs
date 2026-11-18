@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::protocol::{Call, JsonFormat};
-use crate::provider::{Protocol, Provider};
+use crate::provider::{ModelInfo, Protocol, Provider};
 use crate::response::{Reasoning, Response, StopReason, Usage};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -59,6 +59,44 @@ pub(crate) async fn run(
         }
         _ => unreachable!("cli::run called for an HTTP protocol"),
     }
+}
+
+/// Reads Codex's model catalog. Only models Codex itself lists in its picker are returned.
+pub(crate) async fn codex_models(provider: &Provider) -> Result<Vec<ModelInfo>> {
+    let output = exec(
+        provider,
+        &["debug".into(), "models".into()],
+        "",
+        Duration::from_secs(20),
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(codex_error(
+            &provider.name,
+            &String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    let body: Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| cli_error(provider, e.into()))?;
+    Ok(parse_codex_models(&body))
+}
+
+fn parse_codex_models(body: &Value) -> Vec<ModelInfo> {
+    let mut listed: Vec<&Value> = body["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"] == "list")
+        .collect();
+    listed.sort_by_key(|m| m["priority"].as_i64().unwrap_or(i64::MAX));
+    listed
+        .into_iter()
+        .filter_map(|m| {
+            let id = m["slug"].as_str()?;
+            let description = m["description"].as_str().map(str::to_string);
+            Some(ModelInfo::new(id, description))
+        })
+        .collect()
 }
 
 async fn exec(
@@ -322,6 +360,20 @@ mod tests {
         assert!(args.contains(&r#"developer_instructions="say \"hi\"\nthen stop""#.to_string()));
         assert!(args.contains(&"read-only".to_string()));
         assert!(args.contains(&r#"model_reasoning_effort="low""#.to_string()));
+    }
+
+    #[test]
+    fn codex_catalog_keeps_listed_models_in_priority_order() {
+        let body = serde_json::json!({"models": [
+            {"slug": "hidden", "visibility": "hide", "priority": 1},
+            {"slug": "gpt-5.6-terra", "visibility": "list", "priority": 3, "description": "Legacy"},
+            {"slug": "gpt-6-luna", "visibility": "list", "priority": 2, "description": "Fast"}
+        ]});
+        let ids: Vec<String> = parse_codex_models(&body)
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, ["gpt-6-luna", "gpt-5.6-terra"]);
     }
 
     #[test]

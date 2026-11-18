@@ -66,7 +66,7 @@ Where the provider supports it, conduit uses its built-in JSON mode or schema en
 conduit::setup::run("my-app").await?;
 ```
 
-The wizard lets the user pick a provider, lists that provider's models live, checks credentials, saves the choice and sends a test prompt. It's behind the default `setup` feature; use `default-features = false` to drop it.
+A full-screen wizard: providers show live status (key found, server running, CLI installed), models are listed live with descriptions (`codex debug models` for Codex), Esc goes back a step, and nothing is saved until a model is picked. It's behind the default `setup` feature; use `default-features = false` to drop it.
 
 ## Providers
 

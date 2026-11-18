@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::instructions::{Instructions, tag};
 use crate::json;
 use crate::protocol::{Call, JsonFormat, error_message};
-use crate::provider::{Protocol, Provider, preset};
+use crate::provider::{ModelInfo, Protocol, Provider, preset};
 use crate::response::{Reasoning, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -74,14 +74,15 @@ impl Conduit {
         }
     }
 
-    /// Models the provider reports as available. CLI providers return their suggested aliases.
-    pub async fn list_models(&self) -> Result<Vec<String>> {
+    /// Models the provider offers. CLI providers ask the CLI where it can say (`codex debug models`)
+    /// and otherwise return the preset's suggested list.
+    pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let p = &self.provider;
+        if p.protocol == Protocol::Codex {
+            return cli::codex_models(p).await;
+        }
         if p.protocol.is_cli() {
-            let suggested = preset(&p.name)
-                .map(|pr| pr.suggested_models)
-                .unwrap_or_default();
-            return Ok(suggested.iter().map(|m| m.to_string()).collect());
+            return Ok(suggested_models(p));
         }
         let url = p.protocol.models_url(&p.endpoint);
         let key = p.api_key()?;
@@ -207,6 +208,16 @@ impl Conduit {
     }
 }
 
+/// The preset's curated model list, for providers that can't list their own.
+pub fn suggested_models(provider: &Provider) -> Vec<ModelInfo> {
+    preset(&provider.name)
+        .map(|p| p.suggested_models)
+        .unwrap_or_default()
+        .iter()
+        .map(|(id, description)| ModelInfo::new(*id, Some(description.to_string())))
+        .collect()
+}
+
 fn from_config_with_env(config: &Config, env: impl Fn(&str) -> Option<String>) -> Result<Conduit> {
     let set = |key: &str| env(key).filter(|v| !v.trim().is_empty());
     let name = set("CONDUIT_PROVIDER").unwrap_or_else(|| config.active_provider().to_string());
@@ -320,13 +331,13 @@ impl Request<'_> {
         loop {
             match conduit.post(&call).await {
                 Err(Error::Api {
-                    status: 400,
+                    status: status @ (400 | 422 | 501),
                     provider,
                     message,
                 }) => {
                     if !relax(&mut call, &message) {
                         return Err(Error::Api {
-                            status: 400,
+                            status,
                             provider,
                             message,
                         });
@@ -362,6 +373,8 @@ fn relax(call: &mut Call, message: &str) -> bool {
             "json_object",
             "text.format",
             "output_config",
+            "structured output",
+            "format",
         ]
         .iter()
         .any(|k| message.contains(k))
@@ -479,5 +492,10 @@ mod tests {
         assert_eq!(call.temperature, None);
         assert_eq!(call.reasoning, Some(Reasoning::Low));
         assert!(!relax(&mut call, "Unsupported parameter: 'temperature'"));
+
+        let json = JsonFormat::Any;
+        call.json = Some(&json);
+        assert!(relax(&mut call, "structured output is unavailable"));
+        assert!(call.json.is_none());
     }
 }

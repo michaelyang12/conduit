@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use std::time::Duration;
 
 /// How hard the model should think before answering. Mapped onto each provider's own knob
@@ -45,7 +45,66 @@ impl Response {
     /// The policy behind `Request::text()` and `Request::json()`: turn a raw response into usable text,
     /// or an error when the output can't be trusted.
     pub fn into_text(self) -> Result<String> {
-        // TODO(user): decide how truncated, refused and empty responses surface to callers.
-        todo!("Response::into_text policy")
+        match self.stop {
+            StopReason::MaxTokens => Err(Error::Truncated { partial: self.text }),
+            StopReason::Refusal => Err(Error::Refused {
+                provider: self.provider,
+                message: if self.text.is_empty() {
+                    "no explanation given".to_string()
+                } else {
+                    self.text
+                },
+            }),
+            _ if self.text.is_empty() => Err(Error::Empty {
+                provider: self.provider,
+                reason: match self.stop {
+                    StopReason::Other(reason) => reason,
+                    _ => "the model returned no text".to_string(),
+                },
+            }),
+            _ => Ok(self.text),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn response(text: &str, stop: StopReason) -> Response {
+        Response {
+            text: text.to_string(),
+            provider: "p".into(),
+            model: "m".into(),
+            stop,
+            usage: None,
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn only_complete_nonempty_text_is_accepted() {
+        assert_eq!(
+            response("ls", StopReason::Complete).into_text().unwrap(),
+            "ls"
+        );
+        assert!(matches!(
+            response("rm -rf /tmp/fo", StopReason::MaxTokens).into_text(),
+            Err(Error::Truncated { partial }) if partial == "rm -rf /tmp/fo"
+        ));
+        assert!(matches!(
+            response("", StopReason::Refusal).into_text(),
+            Err(Error::Refused { .. })
+        ));
+        assert!(matches!(
+            response("", StopReason::Complete).into_text(),
+            Err(Error::Empty { .. })
+        ));
+        assert_eq!(
+            response("x", StopReason::Other("pause".into()))
+                .into_text()
+                .unwrap(),
+            "x"
+        );
     }
 }

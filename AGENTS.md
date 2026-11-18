@@ -6,7 +6,7 @@ conduit is a Rust library crate (edition 2024) that gives CLI tools one opiniona
 
 ```sh
 cargo build                                  # default features include the `setup` wizard
-cargo build --no-default-features            # library without dialoguer/console
+cargo build --no-default-features            # library without inquire/console
 cargo test                                   # unit tests + tests/providers.rs (wiremock, no network)
 cargo test --test providers ollama_round_trip   # one integration test
 cargo test json::tests                       # one module's unit tests

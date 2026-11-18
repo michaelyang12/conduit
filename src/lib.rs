@@ -32,5 +32,5 @@ pub use client::{Conduit, DEFAULT_TIMEOUT, Request};
 pub use config::{Config, ProviderConfig};
 pub use error::{Error, Result};
 pub use instructions::{Instructions, InstructionsBuilder};
-pub use provider::{Protocol, Provider};
+pub use provider::{ModelInfo, Protocol, Provider};
 pub use response::{Reasoning, Response, StopReason, Usage};

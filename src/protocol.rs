@@ -3,7 +3,7 @@ mod chat;
 mod ollama;
 mod responses;
 
-use crate::provider::Protocol;
+use crate::provider::{ModelInfo, Protocol};
 use crate::response::{Reasoning, StopReason, Usage};
 use reqwest::RequestBuilder;
 use serde_json::Value;
@@ -99,20 +99,64 @@ impl Protocol {
         Ok(parsed)
     }
 
-    pub(crate) fn parse_models(self, body: Value) -> Vec<String> {
-        let (list, key) = match self {
-            Protocol::Ollama => ("models", "name"),
-            _ => ("data", "id"),
+    pub(crate) fn parse_models(self, body: Value) -> Vec<ModelInfo> {
+        let list = if self == Protocol::Ollama {
+            "models"
+        } else {
+            "data"
         };
-        let mut models: Vec<String> = body[list]
+        let mut models: Vec<ModelInfo> = body[list]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|m| m[key].as_str().map(str::to_string))
+            .filter_map(|m| {
+                let id = m["id"].as_str().or_else(|| m["name"].as_str())?;
+                let description = match self {
+                    Protocol::Ollama => ollama_details(&m["details"]),
+                    _ => m["display_name"]
+                        .as_str()
+                        .or_else(|| m["name"].as_str())
+                        .filter(|name| *name != id)
+                        .map(str::to_string),
+                };
+                Some(ModelInfo::new(id, description))
+            })
+            .filter(|m| is_text_model(&m.id))
             .collect();
-        models.sort();
+        models.sort_by(|a, b| a.id.cmp(&b.id));
         models
     }
+}
+
+fn ollama_details(details: &Value) -> Option<String> {
+    let parts: Vec<&str> = ["parameter_size", "quantization_level"]
+        .iter()
+        .filter_map(|k| details[*k].as_str().filter(|v| !v.is_empty()))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// Model lists from OpenAI-style APIs include embedding, audio and image models that can't chat.
+fn is_text_model(id: &str) -> bool {
+    const NON_CHAT: &[&str] = &[
+        "embed",
+        "embedding",
+        "whisper",
+        "tts",
+        "transcribe",
+        "audio",
+        "realtime",
+        "dall-e",
+        "image",
+        "moderation",
+        "davinci",
+        "babbage",
+        "search",
+        "rerank",
+        "guard",
+    ];
+    let lower = id.to_lowercase();
+    !NON_CHAT.iter().any(|k| lower.contains(k))
 }
 
 /// Pulls a human-readable message out of an error body, whatever shape the provider uses.
@@ -209,6 +253,27 @@ mod tests {
         );
         assert_eq!(body(Protocol::Ollama, &any)["format"], "json");
         assert_eq!(body(Protocol::Ollama, &typed)["format"], schema);
+    }
+
+    #[test]
+    fn model_lists_drop_non_chat_models_and_keep_names() {
+        let openai = serde_json::json!({"data": [
+            {"id": "gpt-6-luna"}, {"id": "text-embedding-3-large"}, {"id": "gpt-realtime"}, {"id": "dall-e-3"}
+        ]});
+        let ids: Vec<String> = Protocol::OpenaiResponses
+            .parse_models(openai)
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, ["gpt-6-luna"]);
+
+        let anthropic = serde_json::json!({"data": [{"id": "claude-haiku-5-5", "display_name": "Claude Haiku 5.5"}]});
+        let m = &Protocol::Anthropic.parse_models(anthropic)[0];
+        assert_eq!(m.description.as_deref(), Some("Claude Haiku 5.5"));
+
+        let ollama = serde_json::json!({"models": [{"name": "qwen3:8b", "details": {"parameter_size": "8.2B", "quantization_level": "Q4_K_M"}}]});
+        let m = &Protocol::Ollama.parse_models(ollama)[0];
+        assert_eq!(m.description.as_deref(), Some("8.2B, Q4_K_M"));
     }
 
     #[test]
