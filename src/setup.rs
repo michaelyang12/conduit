@@ -1,258 +1,218 @@
-use crate::config::{Config, Provider};
-use colored::*;
-use std::io::{self, BufRead, Write};
-use std::process::Command;
+//! Interactive provider setup for an app, writing `~/.config/conduit/<app>/config.toml`.
 
-const DEFAULT_OPENAI_MODELS: &[&str] = &[
-    "gpt-5.1",
-    "gpt-4o",
-    "gpt-4o-mini",
-    "o1-mini",
-];
+use crate::client::Conduit;
+use crate::config::{Config, ProviderConfig};
+use crate::error::{Error, Result};
+use crate::provider::{PRESETS, Protocol, Provider, preset};
+use console::style;
+use dialoguer::{Confirm, FuzzySelect, Input, Select, theme::ColorfulTheme};
+use std::time::Duration;
 
-const DEFAULT_ANTHROPIC_MODELS: &[&str] = &[
-    "claude-sonnet-4-20250514",
-    "claude-opus-4-20250514",
-    "claude-3-5-haiku-20241022",
-];
+const CLI_DEFAULT: &str = "(the CLI's default model)";
+const TYPE_MODEL: &str = "Type a model name...";
+const OTHER_SERVER: &str = "Other OpenAI-compatible server...";
 
-/// Options for customizing the setup wizard.
-#[derive(Default)]
-pub struct SetupOptions {
-    /// Additional OpenAI models to show (appended after defaults)
-    pub extra_openai_models: Vec<String>,
-    /// Additional Anthropic models to show (appended after defaults)
-    pub extra_anthropic_models: Vec<String>,
+/// Walks the user through choosing a provider and model for `app`, then sends a test prompt.
+pub async fn run(app: &str) -> Result<()> {
+    let theme = ColorfulTheme::default();
+    let path = Config::app_path(app);
+    let mut file = Config::read(&path)?;
+    let merged = Config::load(app)?;
+
+    println!("{}", style(format!("{app} LLM setup")).bold());
+    println!("{}\n", style(format!("Saves to {}", path.display())).dim());
+
+    let name = choose_provider(&theme, &merged)?;
+    let mut section = merged.providers.get(&name).cloned().unwrap_or_default();
+    if preset(&name).is_none() && section.endpoint.is_none() {
+        section = define_custom(&theme)?;
+    }
+    let mut provider = Provider::resolve(&name, Some(&section))?;
+
+    if let Some(p) = preset(&name).filter(|p| p.local && !p.protocol.is_cli()) {
+        let endpoint: String = Input::with_theme(&theme)
+            .with_prompt("Server URL")
+            .default(provider.endpoint.clone())
+            .interact_text()
+            .map_err(setup_error)?;
+        let endpoint = endpoint.trim_end_matches('/').to_string();
+        section.endpoint = (endpoint != p.endpoint).then(|| endpoint.clone());
+        provider.endpoint = endpoint;
+    }
+    check_credentials(&provider).await;
+
+    let model = choose_model(&theme, &provider).await?;
+    section.model = model.clone();
+    provider.model = model;
+
+    let existing = file.providers.remove(&name).unwrap_or_default();
+    file.providers.insert(
+        name.clone(),
+        ProviderConfig {
+            model: section.model,
+            endpoint: section.endpoint.or(existing.endpoint),
+            api_key_env: section.api_key_env.or(existing.api_key_env),
+            protocol: section.protocol.or(existing.protocol),
+        },
+    );
+    file.provider = Some(name);
+    file.write(&path)?;
+    println!("{} {}", style("Saved").green(), path.display());
+
+    let test = Confirm::with_theme(&theme)
+        .with_prompt("Send a test prompt?")
+        .default(true)
+        .interact()
+        .map_err(setup_error)?;
+    if test {
+        smoke_test(provider).await;
+    }
+    Ok(())
 }
 
-/// Run the interactive setup wizard for the given app.
-pub fn run_setup(app_name: &str, options: Option<SetupOptions>) {
-    let options = options.unwrap_or_default();
-
-    println!("{}", format!("{} configuration\n", app_name).bold());
-
-    let current = Config::load(app_name);
-    let current_provider_str = match current.provider {
-        Provider::OpenAI => "openai",
-        Provider::Anthropic => "anthropic",
-        Provider::Ollama => "ollama",
-    };
-    let current_model = match current.provider {
-        Provider::OpenAI => current.openai_model(),
-        Provider::Anthropic => current.anthropic_model(),
-        Provider::Ollama => current.ollama_model(),
-    };
-    println!(
-        "Current: {} / {}\n",
-        current_provider_str.cyan(),
-        current_model.cyan()
-    );
-
-    // Select provider
-    println!("Provider:");
-    let providers = [
-        ("OpenAI", Provider::OpenAI),
-        ("Anthropic", Provider::Anthropic),
-        ("Ollama (local)", Provider::Ollama),
-    ];
-    for (i, (name, p)) in providers.iter().enumerate() {
-        let is_current =
-            std::mem::discriminant(p) == std::mem::discriminant(&current.provider);
-        let marker = if is_current {
-            " ← selected".cyan().to_string()
-        } else {
-            String::new()
-        };
-        println!("  {}. {}{}", i + 1, name, marker);
+fn choose_provider(theme: &ColorfulTheme, merged: &Config) -> Result<String> {
+    let current = merged.active_provider();
+    let mut names: Vec<String> = PRESETS.iter().map(|p| p.name.to_string()).collect();
+    let mut labels: Vec<String> = PRESETS.iter().map(|p| p.label.to_string()).collect();
+    for name in merged.providers.keys().filter(|n| preset(n).is_none()) {
+        names.push(name.clone());
+        labels.push(format!("{name} (custom)"));
     }
-    print!("\n> ");
-    io::stdout().flush().unwrap();
+    labels.push(OTHER_SERVER.to_string());
 
-    let provider_choice = read_line();
-    let provider = match provider_choice.trim() {
-        "" => current.provider.clone(),
-        "1" => Provider::OpenAI,
-        "2" => Provider::Anthropic,
-        "3" => Provider::Ollama,
-        _ => {
-            eprintln!("{}", "Invalid choice".red());
-            return;
-        }
-    };
-
-    // Check API key / Ollama status
-    match &provider {
-        Provider::OpenAI => {
-            if std::env::var("OPENAI_API_KEY").is_err() {
-                eprintln!("\n{}", "Warning: OPENAI_API_KEY not set".yellow());
-                eprintln!("Add to your shell profile:");
-                eprintln!("  export OPENAI_API_KEY=\"your_key_here\"\n");
-            } else {
-                println!("\n{}", "OPENAI_API_KEY found".green());
-            }
-        }
-        Provider::Anthropic => {
-            if std::env::var("ANTHROPIC_API_KEY").is_err() {
-                eprintln!("\n{}", "Warning: ANTHROPIC_API_KEY not set".yellow());
-                eprintln!("Add to your shell profile:");
-                eprintln!("  export ANTHROPIC_API_KEY=\"your_key_here\"\n");
-            } else {
-                println!("\n{}", "ANTHROPIC_API_KEY found".green());
-            }
-        }
-        Provider::Ollama => {
-            if !check_ollama_running() {
-                eprintln!(
-                    "\n{}",
-                    "Warning: Ollama doesn't appear to be running".yellow()
-                );
-                eprintln!("Start it with: ollama serve\n");
-            } else {
-                println!("\n{}", "Ollama is running".green());
-            }
-        }
+    let choice = Select::with_theme(theme)
+        .with_prompt("Provider")
+        .items(&labels)
+        .default(names.iter().position(|n| n == current).unwrap_or(0))
+        .interact()
+        .map_err(setup_error)?;
+    if choice < names.len() {
+        return Ok(names[choice].clone());
     }
+    Input::with_theme(theme)
+        .with_prompt("Name for this provider")
+        .validate_with(|s: &String| {
+            if s.trim().is_empty() || preset(s.trim()).is_some() {
+                Err("pick a new, non-empty name")
+            } else {
+                Ok(())
+            }
+        })
+        .interact_text()
+        .map(|s: String| s.trim().to_string())
+        .map_err(setup_error)
+}
 
-    // Select model
-    let model = select_model(&provider, &current, &options);
+fn define_custom(theme: &ColorfulTheme) -> Result<ProviderConfig> {
+    let endpoint: String = Input::with_theme(theme)
+        .with_prompt("Base URL (e.g. http://localhost:8080/v1)")
+        .interact_text()
+        .map_err(setup_error)?;
+    let key_env: String = Input::with_theme(theme)
+        .with_prompt("Environment variable holding the API key (blank for none)")
+        .allow_empty(true)
+        .interact_text()
+        .map_err(setup_error)?;
+    Ok(ProviderConfig {
+        endpoint: Some(endpoint.trim_end_matches('/').to_string()),
+        api_key_env: Some(key_env.trim().to_string()).filter(|k| !k.is_empty()),
+        protocol: Some(Protocol::ChatCompletions),
+        model: None,
+    })
+}
 
-    // Build and save config
-    let mut config = Config::default();
-    config.provider = provider.clone();
-
-    match provider {
-        Provider::OpenAI => config.openai_model = model,
-        Provider::Anthropic => config.anthropic_model = model,
-        Provider::Ollama => config.ollama_model = model,
-    }
-
-    if let Err(e) = config.save(app_name) {
-        eprintln!("{}", format!("Failed to save config: {}", e).red());
+async fn check_credentials(provider: &Provider) {
+    if provider.protocol.is_cli() {
+        let found = tokio::process::Command::new(&provider.endpoint)
+            .arg("--version")
+            .output()
+            .await
+            .is_ok_and(|o| o.status.success());
+        if !found {
+            warn(&format!("`{}` was not found on PATH", provider.endpoint));
+        }
         return;
     }
-
-    println!(
-        "\n{}",
-        format!(
-            "Configuration saved to ~/.config/conduit/{}/config.json",
-            app_name
-        )
-        .green()
-    );
+    if let Some(env) = &provider.api_key_env
+        && std::env::var(env).map_or(true, |v| v.trim().is_empty())
+        && !provider.is_local()
+    {
+        warn(&format!("{env} is not set. Add it to your shell profile:"));
+        println!("  export {env}=\"...\"");
+    }
 }
 
-fn select_model(
-    provider: &Provider,
-    current_config: &Config,
-    options: &SetupOptions,
-) -> Option<String> {
-    let models: Vec<String> = match provider {
-        Provider::OpenAI => {
-            let mut m: Vec<String> =
-                DEFAULT_OPENAI_MODELS.iter().map(|s| s.to_string()).collect();
-            m.extend(options.extra_openai_models.iter().cloned());
-            m
-        }
-        Provider::Anthropic => {
-            let mut m: Vec<String> = DEFAULT_ANTHROPIC_MODELS
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            m.extend(options.extra_anthropic_models.iter().cloned());
-            m
-        }
-        Provider::Ollama => {
-            print!("Fetching models...");
-            io::stdout().flush().unwrap();
-            let m = get_ollama_models();
-            print!("\r                   \r");
-            m
+async fn choose_model(theme: &ColorfulTheme, provider: &Provider) -> Result<Option<String>> {
+    let conduit = Conduit::new(provider.clone()).with_timeout(Duration::from_secs(15));
+    let mut models = match conduit.list_models().await {
+        Ok(models) => models,
+        Err(e) => {
+            warn(&format!("couldn't list models: {e}"));
+            preset(&provider.name)
+                .map(|p| p.suggested_models.iter().map(|m| m.to_string()).collect())
+                .unwrap_or_default()
         }
     };
-
-    if models.is_empty() {
-        eprintln!("{}", "No models available".yellow());
-        return None;
+    if provider.protocol == Protocol::Ollama && models.is_empty() {
+        warn("no local models found; pull one with `ollama pull <model>`");
+    }
+    if let Some(current) = &provider.model
+        && !models.contains(current)
+    {
+        models.insert(0, current.clone());
     }
 
-    let current_model = match provider {
-        Provider::OpenAI => current_config.openai_model(),
-        Provider::Anthropic => current_config.anthropic_model(),
-        Provider::Ollama => current_config.ollama_model(),
-    };
-
-    let default_model = match provider {
-        Provider::OpenAI => "gpt-5.1",
-        Provider::Anthropic => "claude-sonnet-4-20250514",
-        Provider::Ollama => models.first().map(|s| s.as_str()).unwrap_or(""),
-    };
-
-    println!("\nModel:");
-    for (i, model) in models.iter().enumerate() {
-        let is_default = model == default_model;
-        let is_selected = model == current_model;
-        let marker = match (is_default, is_selected) {
-            (true, true) => " (default) ← selected".cyan().to_string(),
-            (true, false) => " (default)".dimmed().to_string(),
-            (false, true) => " ← selected".cyan().to_string(),
-            (false, false) => String::new(),
-        };
-        println!("  {}. {}{}", i + 1, model, marker);
+    let mut items = Vec::new();
+    if provider.model_optional() {
+        items.push(CLI_DEFAULT.to_string());
     }
-    print!("\n> ");
-    io::stdout().flush().unwrap();
+    items.extend(models);
+    items.push(TYPE_MODEL.to_string());
 
-    let choice = read_line();
-    let choice = choice.trim();
-
-    if choice.is_empty() {
-        println!("{}", format!("Keeping current: {}", current_model).dimmed());
-        // Return current if it differs from default, otherwise None (use default)
-        if current_model != default_model {
-            return Some(current_model.to_string());
-        }
-        return None;
-    }
-
-    match choice.parse::<usize>() {
-        Ok(n) if n >= 1 && n <= models.len() => {
-            let chosen = &models[n - 1];
-            if chosen == default_model {
-                None // Store None so config falls back to default
-            } else {
-                Some(chosen.clone())
-            }
-        }
-        _ => {
-            eprintln!("{}", "Invalid choice, keeping current".yellow());
-            if current_model != default_model {
-                Some(current_model.to_string())
-            } else {
-                None
-            }
-        }
+    let default = provider
+        .model
+        .as_ref()
+        .and_then(|m| items.iter().position(|i| i == m))
+        .unwrap_or(0);
+    let choice = FuzzySelect::with_theme(theme)
+        .with_prompt("Model")
+        .items(&items)
+        .default(default)
+        .interact()
+        .map_err(setup_error)?;
+    match items[choice].as_str() {
+        CLI_DEFAULT => Ok(None),
+        TYPE_MODEL => Input::with_theme(theme)
+            .with_prompt("Model name")
+            .interact_text()
+            .map(|s: String| Some(s.trim().to_string()))
+            .map_err(setup_error),
+        model => Ok(Some(model.to_string())),
     }
 }
 
-fn get_ollama_models() -> Vec<String> {
-    let output = Command::new("ollama").arg("list").output();
-
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .skip(1)
-            .filter_map(|line| line.split_whitespace().next().map(|s| s.to_string()))
-            .collect(),
-        _ => vec![],
+async fn smoke_test(provider: Provider) {
+    let conduit = Conduit::new(provider);
+    match conduit
+        .prompt("Reply with the single word: ready")
+        .send()
+        .await
+    {
+        Ok(r) => println!(
+            "{} {} replied {:?} in {:.1}s",
+            style("OK").green(),
+            r.model,
+            r.text,
+            r.elapsed.as_secs_f32()
+        ),
+        Err(e) => warn(&format!("test prompt failed: {e}")),
     }
 }
 
-fn check_ollama_running() -> bool {
-    reqwest::blocking::get("http://localhost:11434/api/tags").is_ok()
+fn warn(message: &str) {
+    eprintln!("{} {message}", style("warning:").yellow());
 }
 
-fn read_line() -> String {
-    let mut input = String::new();
-    io::stdin().lock().read_line(&mut input).unwrap();
-    input
+fn setup_error(e: dialoguer::Error) -> Error {
+    Error::Setup(e.to_string())
 }
